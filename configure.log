@@ -1,0 +1,16 @@
+MySecureShell has been configured with the following options:
+          Log file: /var/log/sftp-server.log (color: no)
+     User binaries: /usr/bin
+     Shutdown file: /etc/sftp.shut
+Configuration file: /etc/ssh/sftp_config
+ Compilation flags: 
+
+Option supported:
+ACL               : yes
+Remote Admin      : yes
+UTF-8 Encoding    : yes
+
+Sftp extension supported:
+Disk Usage        : yes
+Disk Usage OpenSSH: yes
+File Hashing      : no

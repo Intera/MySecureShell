@@ -1,0 +1,262 @@
+diff -upr mysecureshell_1.25/conf.c mysecureshell-1.25-xferlog/conf.c
+--- mysecureshell_1.25/conf.c	2010-11-16 19:50:36.000000000 +0100
++++ mysecureshell-1.25-xferlog/conf.c	2012-07-02 08:51:16.000000000 +0200
+@@ -82,6 +82,9 @@ static const tConf	confParams[] =
+     { "PathDenyFilter", CONF_IS_STRING, CONF_SHOW },
+     { "SftpProtocol", CONF_IS_INT, CONF_SHOW_IF_NOT_NULL },
+     { "LogFile", CONF_IS_STRING, CONF_SHOW_IF_NOT_NULL },
++    { "LogFileXferlog", CONF_IS_STRING, CONF_SHOW_IF_NOT_NULL },
++    { "UseXferlog", CONF_IS_BOOLEAN, CONF_SHOW },
++    { "LogXferlogFullPath", CONF_IS_BOOLEAN, CONF_SHOW },
+     { "ConnectionMaxLife", CONF_IS_TIME, CONF_SHOW },
+     { "DisableAccount", CONF_IS_BOOLEAN, CONF_SHOW },
+ #ifdef MSS_HAVE_ADMIN
+diff -upr mysecureshell_1.25/main.c mysecureshell-1.25-xferlog/main.c
+--- mysecureshell_1.25/main.c	2010-12-03 19:04:22.000000000 +0100
++++ mysecureshell-1.25-xferlog/main.c	2012-07-02 16:10:59.000000000 +0200
+@@ -32,6 +32,7 @@ Foundation, Inc., 59 Temple Place - Suit
+ #include "SftpServer/Sftp.h"
+ #include "SftpServer/Encoding.h"
+ #include "SftpServer/Log.h"
++#include "SftpServer/LogXferlog.h"
+ #include "security.h"
+ 
+ static void	showVersion(int showAll)
+@@ -174,9 +175,27 @@ int	main(int ac, char **av, char **env)
+ 	  SftpWhoRelaseStruct(NULL);
+ 	  delete_hash();
+ 	  mylog_close();
++   	  xferlog_close();
+ 	  exit(14);
+ 	}
+-      max = hash_get_int("LimitConnectionByUser");
++	
++	//xferlog patch
++	//we diont use the bitmasks for settings. no clue how that should work....
++	//so we define a global var here
++	global_xferlog_fullpath=0;
++   	if(hash_get_int("LogXferlogFullPath") > 0) {
++		global_xferlog_fullpath=1;
++	}
++ 	if(hash_get_int("UseXferlog") > 0)
++	{
++		if(hash_get("LogFileXferlog") != NULL)
++		{
++			xferlog_open(strdup(hash_get("LogFileXferlog")));
++ 		}
++	}
++	//xferlog patch end
++    
++	  max = hash_get_int("LimitConnectionByUser");
+       if (max > 0 && count_program_for_uid(hash_get("User")) > max)
+ 	{
+ 	  mylog_printf(MYLOG_ERROR, "[%s]Too many connection for this account",
+@@ -329,6 +348,7 @@ int	main(int ac, char **av, char **env)
+ 		  SftpWhoRelaseStruct(params->who);
+ 		  delete_hash();
+ 		  mylog_close();
++    	  xferlog_close();
+ 		  exit(15);
+ 		}
+ 	      else
+diff -upr mysecureshell_1.25/Makefile.in mysecureshell-1.25-xferlog/Makefile.in
+--- mysecureshell_1.25/Makefile.in	2010-02-09 18:49:04.000000000 +0100
++++ mysecureshell-1.25-xferlog/Makefile.in	2012-06-29 10:46:29.000000000 +0200
+@@ -14,6 +14,7 @@ SRC	= main.c string.c	\
+ 	  SftpServer/Handle.c SftpServer/Send.c		\
+ 	  SftpServer/Sftp.c SftpServer/Util.c		\
+ 	  SftpServer/Log.c SftpServer/Encoding.c	\
++	  SftpServer/LogXferlog.c 			\
+ 	  SftpServer/Admin.c SftpServer/SftpWho.c	\
+ 	  SftpServer/SftpExt.c SftpServer/SftpServer.c	\
+ 	  SftpServer/GetUsersInfos.c SftpServer/Stats.c	\
+diff -upr mysecureshell_1.25/sftp_config mysecureshell-1.25-xferlog/sftp_config
+--- mysecureshell_1.25/sftp_config	2008-02-24 19:31:50.000000000 +0100
++++ mysecureshell-1.25-xferlog/sftp_config	2012-07-03 09:08:24.000000000 +0200
+@@ -1,6 +1,9 @@
+ ## MySecureShell Configuration File ##
+ #Default rules for everybody
+ <Default>
++ 	UseXferlog		true
++	LogFileXferlog		/var/log/xferlog_sftp
++	LogXferlogFullPath	true
+ 	GlobalDownload		50k	#total speed download for all clients
+ 					# o -> bytes   k -> kilo bytes   m -> mega bytes
+ 	GlobalUpload		0	#total speed download for all clients (0 for unlimited)
+Only in mysecureshell-1.25-xferlog/SftpServer: LogXferlog.c
+Only in mysecureshell-1.25-xferlog/SftpServer: LogXferlog.h
+diff -upr mysecureshell_1.25/SftpServer/Sftp.c mysecureshell-1.25-xferlog/SftpServer/Sftp.c
+--- mysecureshell_1.25/SftpServer/Sftp.c	2010-06-04 18:33:32.000000000 +0200
++++ mysecureshell-1.25-xferlog/SftpServer/Sftp.c	2012-07-02 16:12:09.000000000 +0200
+@@ -54,6 +54,7 @@ Foundation, Inc., 59 Temple Place - Suit
+ #include "Encoding.h"
+ #include "Handle.h"
+ #include "Log.h"
++#include "LogXferlog.h"
+ #include "Send.h"
+ #include "SftpExt.h"
+ #include "SftpServer.h"
+@@ -363,11 +364,14 @@ void	DoClose()
+ 	pourcentage = 0;
+       if (FILE_IS_UPLOAD(hdl->flags))
+ 	{
++   		xferlog_write(gl_var->who->ip, gl_var->who->time_transf, hdl->fileSize, hdl->path, "i",  gl_var->who->user, "c");
++
+ 	  mylog_printf(MYLOG_TRANSFERT, "[%s][%s]End upload into file '%s'",
+ 		       gl_var->who->user, gl_var->who->ip, hdl->path);
+ 	}
+       else
+ 	{
++		xferlog_write(gl_var->who->ip, gl_var->who->time_transf, hdl->fileSize, hdl->path, "o",  gl_var->who->user, "c");
+ 	  mylog_printf(MYLOG_TRANSFERT, "[%s][%s]End download file '%s' : %i%%",
+ 		       gl_var->who->user, gl_var->who->ip, hdl->path,
+ 		       pourcentage);
+@@ -434,6 +438,9 @@ void	DoOpen()
+ 		  {
+ 		    mylog_printf(MYLOG_TRANSFERT, "[%s][%s]Start upload into file '%s'",
+ 			       gl_var->who->user, gl_var->who->ip, path);
++		    if (fchmod(fd, mode) == -1)
++		      mylog_printf(MYLOG_WARNING, "[%s][%s]Unable to set %i rights for file '%s'",
++				   gl_var->who->user, gl_var->who->ip, mode, path);
+ 		  }
+ 		else
+ 		  {
+@@ -445,7 +452,9 @@ void	DoOpen()
+ 		hdl->filePos = 0;
+ 		hdl->fileSize = 0;
+ 		if (stat(path, &st) != -1)
++		{
+ 		  hdl->fileSize = st.st_size;
++		}
+ 		UpdateInfoForOpenFiles();
+ 		SendHandle(bOut, id, hdl->id);
+ 		status = SSH2_FX_OK;
+@@ -571,6 +580,9 @@ void	DoWrite()
+   else
+     status = (cVersion <= 3 ? SSH2_FX_FAILURE : SSH4_FX_INVALID_HANDLE);
+   //DEBUG((MYLOG_DEBUG, "[DoWrite]hdl:%p off:%llu len:%i ret:%i status:%i", hdl, off, len, ret, status));
++	//intera edit start
++  hdl->fileSize += ret;
++	//intera edit end
+   SendStatus(bOut, id, status);
+ }
+ 
+@@ -733,33 +745,45 @@ void 	DoSetStat(int usePath)
+ 
+ void	DoRemove()
+ {
+-  u_int32_t	id;
+-  char		*path;
+-  int		status = SSH2_FX_OK;
++	u_int32_t	id;
++	char		*path;
++	int			status = SSH2_FX_OK;
++	struct		stat res_stat;	
+ 
+-  id = BufferGetInt32(bIn);
+-  path = convertFromUtf8(BufferGetString(bIn), 1);
+-  if (HAS_BIT(gl_var->flagsDisable, SFTP_DISABLE_REMOVE_FILE))
++	id = BufferGetInt32(bIn);
++	path = convertFromUtf8(BufferGetString(bIn), 1);
++	
++	if (HAS_BIT(gl_var->flagsDisable, SFTP_DISABLE_REMOVE_FILE))
+     {
+       DEBUG((MYLOG_DEBUG, "[DoRemove]Disabled by conf."));
+       status = SSH2_FX_PERMISSION_DENIED;
+     }
+-  else if ((status = CheckRules(path, RULES_RMFILE, 0, 0)) == SSH2_FX_OK)
++	else if ((status = CheckRules(path, RULES_RMFILE, 0, 0)) == SSH2_FX_OK)
+     {
+-      if (HAS_BIT(gl_var->flagsGlobals, SFTPWHO_CAN_RMFILE))
+-	{
+-	  if (unlink(path) == -1)
+-	    status = errnoToPortable(errno);
+-	  mylog_printf(MYLOG_WARNING, "[%s][%s]Try to remove file '%s' : %s",
++		if (HAS_BIT(gl_var->flagsGlobals, SFTPWHO_CAN_RMFILE))
++		{
++			stat(path, &res_stat);
++			if (unlink(path) == -1) 
++			{
++				status = errnoToPortable(errno);
++			}
++
++			if(status == SSH2_FX_OK)
++			{
++			 xferlog_write(gl_var->who->ip, 0, res_stat.st_size , path, "d",  gl_var->who->user, "c");
++			}
++			mylog_printf(MYLOG_WARNING, "[%s][%s]Try to remove file '%s' : %s",
+ 		       gl_var->who->user, gl_var->who->ip, path,
+ 		       (status != SSH2_FX_OK ? strerror(errno) : "success"));
+-	}
+-      else
+-	status = SSH2_FX_PERMISSION_DENIED;
++		}
++		else
++		{
++			status = SSH2_FX_PERMISSION_DENIED;
++		}
+     }
+-  DEBUG((MYLOG_DEBUG, "[DoRemove]path:'%s' -> '%i'", path, status));
+-  SendStatus(bOut, id, status);
+-  free(path);
++	DEBUG((MYLOG_DEBUG, "[DoRemove]path:'%s' -> '%i'", path, status));
++	SendStatus(bOut, id, status);
++	free(path);
+ }
+ 
+ void	DoMkDir()
+diff -upr mysecureshell_1.25/SftpServer/SftpServer.c mysecureshell-1.25-xferlog/SftpServer/SftpServer.c
+--- mysecureshell_1.25/SftpServer/SftpServer.c	2010-06-09 18:50:20.000000000 +0200
++++ mysecureshell-1.25-xferlog/SftpServer/SftpServer.c	2012-06-29 15:31:15.000000000 +0200
+@@ -33,6 +33,7 @@ Foundation, Inc., 59 Temple Place - Suit
+ #include "Global.h"
+ #include "Handle.h"
+ #include "Log.h"
++#include "LogXferlog.h"
+ #include "Sftp.h"
+ #include "GetUsersInfos.h"
+ 
+@@ -54,6 +55,7 @@ static void	end_sftp()
+ 	  mylog_printf(MYLOG_CONNECTION, "[%s][%s]Quit.", gl_var->who->user, gl_var->who->ip);
+ 	}
+       mylog_close_and_free();
++      xferlog_close_and_free();
+       SftpWhoRelaseStruct(gl_var->who);
+       if (gl_var->has_hide_files == MSS_TRUE)
+ 	{
+@@ -98,6 +100,7 @@ static void	end_sftp_by_signal(int signa
+ static void	reopen_log_file(int signal)
+ {
+   mylog_reopen();
++  xferlog_reopen();
+ }
+ 
+ void	ParseConf(tGlobal *params, int sftpProtocol)
+@@ -118,8 +121,11 @@ void	DoInitUser()
+   t_info	*pw;
+   int		uid, gid;
+ 
+-  mylog_printf(MYLOG_CONNECTION, "New client [%s] from [%s]",
+-		gl_var->who->user, gl_var->who->ip);
++  mylog_printf(MYLOG_CONNECTION, "New client [%s] from [%s]", gl_var->who->user, gl_var->who->ip);
++  
++  if (chdir(gl_var->who->home) == -1)
++    mylog_printf(MYLOG_ERROR, "[%s][%s]Couldn't go to home '%s' : %s",
++		 gl_var->who->user, gl_var->who->ip, gl_var->who->home, strerror(errno));
+   umask(000);
+ #ifdef MSSEXT_FILE_HASHING
+   OpenSSL_add_all_digests();
+@@ -438,11 +444,13 @@ void	CloseInfoForOpenFiles()
+         pourcentage = 0;
+       if (FILE_IS_UPLOAD(hdl->flags))
+         {
++										xferlog_write(gl_var->who->ip, gl_var->who->time_transf, hdl->fileSize, hdl->path, "i",  gl_var->who->user, "i");
+           mylog_printf(MYLOG_TRANSFERT, "[%s][%s]Interrupt upload into file '%s'",
+                        gl_var->who->user, gl_var->who->ip, hdl->path);
+         }
+       else
+         {
++										xferlog_write(gl_var->who->ip, gl_var->who->time_transf, hdl->fileSize, hdl->path, "o",  gl_var->who->user, "i");
+           mylog_printf(MYLOG_TRANSFERT, "[%s][%s]Interrupt download file '%s' : %i%%",
+                        gl_var->who->user, gl_var->who->ip, hdl->path,
+                        pourcentage);
